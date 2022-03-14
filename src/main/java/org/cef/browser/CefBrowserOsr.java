@@ -35,21 +35,21 @@ import java.util.concurrent.CompletableFuture;
  */
 public class CefBrowserOsr extends CefBrowser_N implements CefRenderHandler, IBrowser {
     private CefRenderer renderer_;
-    private long window_handle_ = 0;
-    private boolean justCreated_ = false;
+    private final Component canvas_ = new Component() {
+        @Override
+        public Point getLocationOnScreen() {
+            return new Point(0, 0);
+        }
+    };
     private Rectangle browser_rect_ = new Rectangle(0, 0, 1, 1); // Work around CEF issue #1437.
     private Point screenPoint_ = new Point(0, 0);
     private double scaleFactor_ = 1.0;
     private int depth = 32;
     private int depth_per_component = 8;
     private boolean isTransparent_;
-    private final Component dc_ = new Component() {
-        @Override
-        public Point getLocationOnScreen() {
-            return new Point(0, 0);
-        }
-    };
-    private MouseEvent lastMouseEvent = new MouseEvent(dc_, MouseEvent.MOUSE_MOVED, 0, 0, 0, 0, 0, false);
+
+    private MouseEvent lastMouseEvent = new MouseEvent(canvas_, MouseEvent.MOUSE_MOVED, 0, 0, 0, 0, 0, false);
+
     public static boolean CLEANUP = true;
 
     CefBrowserOsr(CefClient client, String url, boolean transparent, CefRequestContext context) {
@@ -57,7 +57,7 @@ public class CefBrowserOsr extends CefBrowser_N implements CefRenderHandler, IBr
     }
 
     private CefBrowserOsr(CefClient client, String url, boolean transparent,
-                          CefRequestContext context, CefBrowserOsr parent, Point inspectAt) {
+            CefRequestContext context, CefBrowserOsr parent, Point inspectAt) {
         super(client, url, context, parent, inspectAt);
         isTransparent_ = transparent;
         renderer_ = new CefRenderer(transparent);
@@ -65,14 +65,13 @@ public class CefBrowserOsr extends CefBrowser_N implements CefRenderHandler, IBr
 
     @Override
     public void createImmediately() {
-        justCreated_ = true;
         // Create the browser immediately.
         createBrowserIfRequired(false);
     }
 
     @Override
     public Component getUIComponent() {
-        return dc_;
+        return canvas_;
     }
 
     @Override
@@ -82,7 +81,7 @@ public class CefBrowserOsr extends CefBrowser_N implements CefRenderHandler, IBr
 
     @Override
     protected CefBrowser_N createDevToolsBrowser(CefClient client, String url,
-                                                 CefRequestContext context, CefBrowser_N parent, Point inspectAt) {
+            CefRequestContext context, CefBrowser_N parent, Point inspectAt) {
         return new CefBrowserOsr(
                 client, url, isTransparent_, context, (CefBrowserOsr) this, inspectAt);
     }
@@ -112,6 +111,71 @@ public class CefBrowserOsr extends CefBrowser_N implements CefRenderHandler, IBr
         renderer_.onPopupSize(size);
     }
 
+
+    private static class PaintData {
+        private ByteBuffer buffer;
+        private int width;
+        private int height;
+        private Rectangle[] dirtyRects;
+        private boolean hasFrame;
+        private boolean fullReRender;
+        private boolean popup;
+    }
+
+    private final PaintData paintData = new PaintData();
+
+    @Override
+    public void onPaint(CefBrowser browser, boolean popup, Rectangle[] dirtyRects,
+                        ByteBuffer buffer, int width, int height) {
+
+        final int size = (width * height) << 2;
+
+        synchronized (paintData) {
+            if (buffer.limit() > size)
+                Log.warning("Skipping MCEF browser frame, data is too heavy");
+            else {
+                if (paintData.hasFrame) //The previous frame was not uploaded to GL texture, so we skip it and render this on instead
+                    paintData.fullReRender = true;
+
+                if (paintData.buffer == null || size != paintData.buffer.capacity()) //This only happens when the browser gets resized
+                    paintData.buffer = BufferUtils.createByteBuffer(size);
+
+                paintData.buffer.position(0);
+                paintData.buffer.limit(buffer.limit());
+                buffer.position(0);
+                paintData.buffer.put(buffer);
+                paintData.buffer.position(0);
+
+                paintData.width = width;
+                paintData.height = height;
+                paintData.dirtyRects = dirtyRects;
+                paintData.hasFrame = true;
+                paintData.popup = popup;
+            }
+        }
+    }
+
+
+    @Override
+    public boolean onCursorChange(CefBrowser browser, final int cursorType) {
+        return true;
+    }
+
+    public void mcefUpdate() {
+        synchronized (paintData) {
+            if (paintData.hasFrame) {
+                renderer_.onPaint(paintData.popup, paintData.dirtyRects, paintData.buffer, paintData.width, paintData.height, paintData.fullReRender);
+                paintData.hasFrame = false;
+                paintData.fullReRender = false;
+            }
+        }
+
+        //So sadly this is the only way I could get around the "youtube not rendering video if the mouse doesn't move bug"
+        //Even the test browser from the original JCEF library doesn't fix this...
+        //What I hope, however, is that it doesn't redraw the entire browser... otherwise I could just call "invalidate"
+        sendMouseEvent(lastMouseEvent);
+    }
+
     @Override
     public void close() {
         if (CLEANUP) {
@@ -125,8 +189,8 @@ public class CefBrowserOsr extends CefBrowser_N implements CefRenderHandler, IBr
     @Override
     public void resize(int width, int height) {
         browser_rect_.setBounds(0, 0, width, height);
-        dc_.setBounds(browser_rect_);
-        dc_.setVisible(true);
+        canvas_.setBounds(browser_rect_);
+        canvas_.setVisible(true);
         wasResized(width, height);
     }
 
@@ -137,29 +201,29 @@ public class CefBrowserOsr extends CefBrowser_N implements CefRenderHandler, IBr
 
     @Override
     public int getTextureID() {
-        return renderer_.texture_id_[0];
+        return renderer_.getTextureID();
     }
 
     @Override
     public void injectMouseMove(int x, int y, int mods, boolean left) {
-        //FIXME: 'left' is not used as it causes bugs since MCEF 1.11
-
-        MouseEvent ev = new MouseEvent(dc_, MouseEvent.MOUSE_MOVED, 0, mods, x, y, 0, false);
+        MouseEvent ev = new MouseEvent(canvas_, MouseEvent.MOUSE_MOVED, 0, mods, x, y, 0, false);
         lastMouseEvent = ev;
         sendMouseEvent(ev);
     }
 
     @Override
     public void injectMouseButton(int x, int y, int mods, int btn, boolean pressed, int ccnt) {
-        MouseEvent ev = new MouseEvent(dc_, pressed ? MouseEvent.MOUSE_PRESSED : MouseEvent.MOUSE_RELEASED, 0, mods, x, y, ccnt, false, btn);
+        MouseEvent ev = new MouseEvent(canvas_, pressed ? MouseEvent.MOUSE_PRESSED : MouseEvent.MOUSE_RELEASED, 0, mods, x, y, ccnt, false, btn);
         sendMouseEvent(ev);
     }
 
     @Override
     public void injectKeyTyped(char c, int mods) {
-        KeyEvent ev = new KeyEvent(dc_, KeyEvent.KEY_TYPED, 0, mods, 0, c);
+        KeyEvent ev = new KeyEvent(canvas_, KeyEvent.KEY_TYPED, 0, mods, 0, c);
         sendKeyEvent(ev);
     }
+
+    private static final Map<Integer, Character> WORST_HACK = new HashMap<>();
 
     public static int remapKeycode(int kc, char c) {
         switch (kc) {
@@ -203,11 +267,9 @@ public class CefBrowserOsr extends CefBrowser_N implements CefRenderHandler, IBr
             }
         }
 
-        KeyEvent ev = new KeyEvent(dc_, KeyEvent.KEY_PRESSED, 0, mods, remapKeycode(keyCode, c), c);
+        KeyEvent ev = new KeyEvent(canvas_, KeyEvent.KEY_PRESSED, 0, mods, remapKeycode(keyCode, c), c);
         sendKeyEvent(ev);
     }
-
-    private static final Map<Integer, Character> WORST_HACK = new HashMap<>();
 
     @Override
     public void injectKeyReleasedByKeyCode(int keyCode, char c, int mods) {
@@ -217,13 +279,13 @@ public class CefBrowserOsr extends CefBrowser_N implements CefRenderHandler, IBr
             }
         }
 
-        KeyEvent ev = new KeyEvent(dc_, KeyEvent.KEY_RELEASED, 0, mods, remapKeycode(keyCode, c), c);
+        KeyEvent ev = new KeyEvent(canvas_, KeyEvent.KEY_RELEASED, 0, mods, remapKeycode(keyCode, c), c);
         sendKeyEvent(ev);
     }
 
     @Override
     public void injectMouseWheel(int x, int y, int mods, int amount, int rot) {
-        MouseWheelEvent ev = new MouseWheelEvent(dc_, MouseEvent.MOUSE_WHEEL, 0, mods, x, y, 0, false, MouseWheelEvent.WHEEL_UNIT_SCROLL, amount, rot);
+        MouseWheelEvent ev = new MouseWheelEvent(canvas_, MouseEvent.MOUSE_WHEEL, 0, mods, x, y, 0, false, MouseWheelEvent.WHEEL_UNIT_SCROLL, amount, rot);
         sendMouseWheelEvent(ev);
     }
 
@@ -242,79 +304,15 @@ public class CefBrowserOsr extends CefBrowser_N implements CefRenderHandler, IBr
         return isLoading();
     }
 
-    private static class PaintData {
-        private ByteBuffer buffer;
-        private int width;
-        private int height;
-        private Rectangle[] dirtyRects;
-        private boolean hasFrame;
-        private boolean fullReRender;
-    }
-
-    private final PaintData paintData = new PaintData();
-
-    @Override
-    public void onPaint(CefBrowser browser, boolean popup, Rectangle[] dirtyRects,
-                        ByteBuffer buffer, int width, int height) {
-        if (popup) {
-            return;
-        }
-
-        final int size = (width * height) << 2;
-
-        synchronized (paintData) {
-            if (buffer.limit() > size)
-                Log.warning("Skipping MCEF browser frame, data is too heavy"); //TODO: Don't spam
-            else {
-                if (paintData.hasFrame) //The previous frame was not uploaded to GL texture, so we skip it and render this on instead
-                    paintData.fullReRender = true;
-
-                if (paintData.buffer == null || size != paintData.buffer.capacity()) //This only happens when the browser gets resized
-                    paintData.buffer = BufferUtils.createByteBuffer(size);
-
-                paintData.buffer.position(0);
-                paintData.buffer.limit(buffer.limit());
-                buffer.position(0);
-                paintData.buffer.put(buffer);
-                paintData.buffer.position(0);
-
-                paintData.width = width;
-                paintData.height = height;
-                paintData.dirtyRects = dirtyRects;
-                paintData.hasFrame = true;
-            }
-        }
-    }
-
-    public void mcefUpdate() {
-        synchronized (paintData) {
-            if (paintData.hasFrame) {
-                renderer_.onPaint(false, paintData.dirtyRects, paintData.buffer, paintData.width, paintData.height, paintData.fullReRender);
-                paintData.hasFrame = false;
-                paintData.fullReRender = false;
-            }
-        }
-
-        //So sadly this is the only way I could get around the "youtube not rendering video if the mouse doesn't move bug"
-        //Even the test browser from the original JCEF library doesn't fix this...
-        //What I hope, however, is that it doesn't redraw the entire browser... otherwise I could just call "invalidate"
-        sendMouseEvent(lastMouseEvent);
-    }
-
-    @Override
-    public boolean onCursorChange(CefBrowser browser, final int cursorType) {
-        return true;
-    }
-
     @Override
     public boolean startDragging(CefBrowser browser, CefDragData dragData, int mask, int x, int y) {
-        // TODO(JCEF) Prepared for DnD support using OSR mode.
+        // (JCEF) Prepared for DnD support using OSR mode.
         return false;
     }
 
     @Override
     public void updateDragCursor(CefBrowser browser, int operation) {
-        // TODO(JCEF) Prepared for DnD support using OSR mode.
+        // (JCEF) Prepared for DnD support using OSR mode.
     }
 
     private void createBrowserIfRequired(boolean hasParent) {
@@ -330,6 +328,12 @@ public class CefBrowserOsr extends CefBrowser_N implements CefRenderHandler, IBr
             // OSR windows cannot be reparented after creation.
             setFocus(true);
         }
+    }
+
+    private void notifyAfterParentChanged() {
+        // With OSR there is no native window to reparent but we still need to send the
+        // notification.
+        getClient().onAfterParentChanged(this);
     }
 
     @Override

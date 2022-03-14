@@ -38,6 +38,9 @@ public abstract class CefRequest {
         RT_SERVICE_WORKER, //!< Main resource of a service worker.
         RT_CSP_REPORT, //!< A report of Content Security Policy violations.
         RT_PLUGIN_RESOURCE, //!< A resource that a plugin requested.
+        RT_NAVIGATION_PRELOAD_MAIN_FRAME, //!< A main-frame service worker navigation preload
+                                          //!< request.
+        RT_NAVIGATION_PRELOAD_SUB_FRAME, //!< A sub-frame service worker navigation preload request.
     }
 
     /**
@@ -139,7 +142,6 @@ public abstract class CefRequest {
 
         /**
          * Removes a qualifier from the enum.
-         * @param The qualifier to be removed.
          */
         public void removeQualifier(TransitionFlags flag) {
             value &= ~flag.getValue();

@@ -33,6 +33,7 @@ import org.cef.browser.CefMessageRouter;
 import org.cef.browser.CefMessageRouter.CefMessageRouterConfig;
 import org.cef.browser.CefRenderer;
 import org.cef.handler.CefLifeSpanHandlerAdapter;
+import org.lwjgl.Sys;
 
 import java.io.BufferedReader;
 import java.io.File;
@@ -284,9 +285,6 @@ public class ClientProxy extends BaseProxy {
             b.close();
 
         browsers.clear();
-
-        if (MCEF.CHECK_VRAM_LEAK)
-            CefRenderer.dumpVRAMLeak();
 
         runMessageLoopFor(100);
         CefApp.forceShutdownState();
